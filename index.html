@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Koele Kindjes Klub Messaging</title>
+<title>5-Koele Kindjes Klub Messaging</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
 <style>
 :root {
@@ -117,6 +117,7 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
 .msg-row.own .msg-header{flex-direction:row-reverse;}
 .msg-name{font-size:12px;font-weight:600;color:var(--text2);}
 .msg-time{font-size:11px;color:var(--text3);font-family:var(--mono);}
+.msg-count{font-size:10px;font-weight:600;padding:1px 6px;background:var(--accent-glow);color:var(--accent2);border-radius:10px;border:1px solid rgba(124,106,255,0.25);}
 .msg-bubble{padding:9px 13px;border-radius:12px;font-size:14px;line-height:1.5;word-break:break-word;background:var(--bg3);color:var(--text);border:1px solid var(--border);}
 .msg-row.own .msg-bubble{background:var(--accent);color:#fff;border-color:transparent;}
 .msg-image{max-width:280px;max-height:280px;border-radius:10px;object-fit:cover;cursor:pointer;display:block;}
@@ -295,19 +296,17 @@ import { getFirestore, collection, addDoc, onSnapshot,
 
 // ─── PASTE YOUR FIREBASE CONFIG HERE ─────────────────────────────────────────
 const firebaseConfig = {
-    apiKey: "AIzaSyCSRCt_jdWovA0NOaUi5fgSlBNP7DCKzKk",
-    authDomain: "koele-kindjes-klub-messaging.firebaseapp.com",
-    databaseURL: "https://koele-kindjes-klub-messaging-default-rtdb.europe-west1.firebasedatabase.app",
-    projectId: "koele-kindjes-klub-messaging",
-    storageBucket: "koele-kindjes-klub-messaging.firebasestorage.app",
-    messagingSenderId: "19707562437",
-    appId: "1:19707562437:web:05c3e944afa62b79b063ac",
-    measurementId: "G-4N3D9DBX46"
+  apiKey:            "YOUR_API_KEY",
+  authDomain:        "YOUR_AUTH_DOMAIN",
+  projectId:         "YOUR_PROJECT_ID",
+  storageBucket:     "YOUR_STORAGE_BUCKET",
+  messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+  appId:             "YOUR_APP_ID"
 };
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── IMGBB API KEY ────────────────────────────────────────────────────────────
-const IMGBB_API_KEY = "25ca4baaaa5bc7f40277dd6aaa2f636b";
+const IMGBB_API_KEY = "YOUR_IMGBB_API_KEY";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const app  = initializeApp(firebaseConfig);
@@ -326,8 +325,8 @@ let lastSenderId     = '';
 let sidebarVisible   = true;
 let typingTimer      = null;
 let isTyping         = false;
-// track which convos have unread messages (id → true)
-const unreadSet      = new Set();
+const unreadSet      = new Set();      // convos with unread messages
+const msgCountMap    = new Map();      // uid -> message count in current convo session
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
 const $   = id => document.getElementById(id);
@@ -437,6 +436,7 @@ function openChannel(id,data){
   setActiveItem(id);
   currentConvo=id; currentConvoType='channel';
   unreadSet.delete(id);
+  msgCountMap.clear();
   buildChatUI(`${data.emoji||'#'} ${data.name}`,'Groepskanaal',data.emoji||'#');
   loadMessages('channels',id);
   stopTypingListener();
@@ -542,6 +542,7 @@ async function startDM(){
 function openDM(id,data,otherName,otherUid){
   setActiveItem(id); currentConvo=id; currentConvoType='dm';
   unreadSet.delete(id);
+  msgCountMap.clear();
   buildChatUI(otherName,'Direct message','💬');
   loadMessages('dms',id);
   stopTypingListener();
@@ -598,38 +599,54 @@ function loadMessages(col,id){
     query(collection(db,col,id,'messages'),orderBy('createdAt','asc'),limit(100)),
     snap=>{
       if(firstLoad){
+        // On first load just render — these are existing messages, no notifications
         firstLoad=false;
         renderMessages(snap.docs);
       } else {
-        // only new messages come in via docChanges
         snap.docChanges().forEach(change=>{
-          if(change.type==='added'){
-            const data=change.doc.data();
-            const c=$('messages');
-            if(c){ appendMessage(data,c); c.scrollTop=c.scrollHeight; }
-            // notify if message is from someone else
-            if(data.uid!==currentUser.uid){
-              // mark unread if chat not visible
-              if(document.hidden || currentConvo!==id){
-                unreadSet.add(id);
-                refreshSidebarUnread(id);
-                showToast(data.displayName||'Nieuw bericht', data.text||'📷 Afbeelding', '💬', ()=>{
-                  // clicking toast opens that convo
-                  const convData = currentConvoType==='channel' ? null : null; // just re-open
-                  if(currentConvoType==='channel'){
-                    // find channel data from list
-                    const el=document.querySelector(`.channel-item[data-id="${id}"]`);
-                    if(el) el.click();
-                  } else {
-                    const el=document.querySelector(`.channel-item[data-id="${id}"]`);
-                    if(el) el.click();
-                  }
-                });
-                // browser notification if permission granted
-                if(Notification.permission==='granted'){
-                  new Notification(data.displayName||'KKK Messaging',{body:data.text||'Stuurde een afbeelding',icon:'https://em-content.zobj.net/source/twitter/376/speech-balloon_1f4ac.png'});
-                }
-              }
+          if(change.type!=='added') return;
+          const data=change.doc.data();
+
+          // Append to chat if it's currently open
+          const c=$('messages');
+          if(c){ appendMessage(data,c); c.scrollTop=c.scrollHeight; }
+
+          // Only notify for other people's messages
+          if(data.uid===currentUser.uid) return;
+
+          const chatIsActive = (currentConvo===id) && !document.hidden;
+
+          // Always mark unread + show in-app toast when not actively looking
+          if(!chatIsActive){
+            unreadSet.add(id);
+            refreshSidebarUnread(id);
+            const preview = data.text || '📷 Afbeelding';
+            showToast(data.displayName||'Nieuw bericht', preview, '💬', ()=>{
+              const el=document.querySelector(`.channel-item[data-id="${id}"]`);
+              if(el) el.click();
+            });
+          }
+
+          // Browser/OS notification — fires whenever tab is hidden OR window not focused
+          const windowFocused = document.hasFocus();
+          if(!windowFocused || document.hidden){
+            if(Notification.permission==='granted'){
+              const n = new Notification((data.displayName||'KKK Messaging') + ' • KKK', {
+                body: data.text || 'Stuurde een afbeelding',
+                icon: 'https://em-content.zobj.net/source/twitter/376/speech-balloon_1f4ac.png',
+                tag: id,        // group notifications per conversation
+                renotify: true, // always sound even if same tag
+                requireInteraction: false,
+              });
+              n.onclick = () => {
+                window.focus();
+                const el=document.querySelector(`.channel-item[data-id="${id}"]`);
+                if(el) el.click();
+                n.close();
+              };
+            } else if(Notification.permission==='default'){
+              // Permission not yet decided — request it now
+              Notification.requestPermission();
             }
           }
         });
@@ -667,9 +684,18 @@ function appendMessage(data,container){
   const content=document.createElement('div');
   content.className='msg-content';
   if(showHeader){
+    // update message count for this sender
+    const uid = data.uid||'unknown';
+    const prevCount = msgCountMap.get(uid)||0;
+    msgCountMap.set(uid, prevCount+1);
+    const count = msgCountMap.get(uid);
+    const isOwn2 = data.uid===currentUser.uid;
+    const countBadge = (!isOwn2 && count>1)
+      ? `<span class="msg-count">${count} berichten</span>`
+      : '';
     const h=document.createElement('div');
     h.className='msg-header';
-    h.innerHTML=`<span class="msg-name">${esc(data.displayName||'Onbekend')}</span><span class="msg-time">${fmt(ts)}</span>`;
+    h.innerHTML=`<span class="msg-name">${esc(data.displayName||'Onbekend')}</span>${countBadge}<span class="msg-time">${fmt(ts)}</span>`;
     content.appendChild(h);
   }
   if(data.imageURL){
@@ -804,8 +830,11 @@ async function handleFileSelect(e){
 
 // ─── Browser notification permission ─────────────────────────────────────────
 function requestNotifPermission(){
-  if('Notification' in window && Notification.permission==='default'){
-    Notification.requestPermission();
+  if(!('Notification' in window)) return;
+  if(Notification.permission==='default'){
+    Notification.requestPermission().then(p=>{
+      console.log('Notification permission:', p);
+    });
   }
 }
 
@@ -846,8 +875,8 @@ $('file-input').addEventListener('change', handleFileSelect);
 
 document.addEventListener('click', e=>{if(e.target.classList.contains('modal-overlay')) closeModals();});
 
-// Request notification permission on first interaction
-document.addEventListener('click', requestNotifPermission, {once:true});
+// Request notification permission immediately
+requestNotifPermission();
 </script>
 </body>
 </html>
