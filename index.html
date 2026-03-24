@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>6 - Koele Kindjes Klub Messaging</title>
+<title>6.2-Koele Kindjes Klub Messaging</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
 <style>
 :root{
@@ -471,17 +471,20 @@ function refreshAllTicks(convoId){
 
 function updateTick(el,convoId,createdAtMs){
   const map=readCache.get(convoId)||new Map();
-  // All OTHER members who have a readAt >= message createdAt
-  let allRead=true;
-  if(map.size===0){ allRead=false; }
-  else{
-    map.forEach((ts,uid)=>{
-      if(uid===currentUser.uid) return; // skip self
-      const readMs=ts.toMillis?.()??ts.seconds*1000;
-      if(readMs<createdAtMs) allRead=false;
-    });
-  }
-  if(allRead && map.size>0){
+
+  // Collect only OTHER people's read timestamps (exclude self)
+  const otherReads=[];
+  map.forEach((ts,uid)=>{
+    if(uid===currentUser.uid) return;
+    otherReads.push(ts.toMillis?.()??ts.seconds*1000);
+  });
+
+  // Double blue tick only if:
+  // 1. At least one OTHER person has a readers entry
+  // 2. ALL of those people have readAt >= this message's createdAt
+  const allRead = otherReads.length > 0 && otherReads.every(readMs => readMs >= createdAtMs);
+
+  if(allRead){
     el.textContent='✓✓';
     el.classList.add('read');
     el.title='Gelezen';
@@ -493,37 +496,57 @@ function updateTick(el,convoId,createdAtMs){
 }
 
 // ─── Unread counts (sidebar badges) ──────────────────────────────────────────
-// We subscribe per convo to count messages after our own lastRead.
-// We keep a map of unsubscribe fns so we can clean them up.
-const unreadUnsubs=new Map();
+// Strategy: listen to ALL messages in a convo in real time.
+// Count how many are from others AND have createdAt > our lastRead timestamp.
+// lastRead is stored in  col/{id}/readers/{myUid}.readAt
+// We do all counting in JS — no compound Firestore queries needed.
+const unreadUnsubs   = new Map(); // convoId -> unsubscribe fn (messages listener)
+const lastReadCache  = new Map(); // convoId -> Date (our own lastRead)
+const msgCache       = new Map(); // convoId -> array of {uid, createdAt (ms)}
 
 function watchUnread(col,id){
-  if(unreadUnsubs.has(id)) return; // already watching
-  // First get our current readAt so we know the cutoff
-  const readerRef=doc(db,col,id,'readers',currentUser.uid);
-  // Listen to our own reader doc to get lastRead, then count after it
-  const unsub=onSnapshot(readerRef,readerSnap=>{
-    let cutoff=null;
-    if(readerSnap.exists()){ cutoff=readerSnap.data().readAt; }
-    // Now count messages after cutoff that are NOT from us
-    countUnread(col,id,cutoff);
+  if(unreadUnsubs.has(id)) return;
+
+  // 1. Load our own lastRead once (and keep it updated via readers listener)
+  const readerRef = doc(db,col,id,'readers',currentUser.uid);
+  onSnapshot(readerRef, snap => {
+    if(snap.exists() && snap.data().readAt){
+      const ts = snap.data().readAt;
+      lastReadCache.set(id, ts.toMillis ? ts.toMillis() : ts.seconds*1000);
+    } else {
+      lastReadCache.set(id, 0);
+    }
+    recomputeUnread(id);
   });
-  unreadUnsubs.set(id,unsub);
+
+  // 2. Listen to messages, cache {uid, createdAt} for each
+  const unsub = onSnapshot(
+    query(collection(db,col,id,'messages'), orderBy('createdAt','asc'), limit(200)),
+    snap => {
+      const msgs = [];
+      snap.forEach(d => {
+        const data = d.data();
+        const ts   = data.createdAt;
+        if(!ts) return;
+        msgs.push({
+          uid:       data.uid,
+          createdAt: ts.toMillis ? ts.toMillis() : ts.seconds*1000
+        });
+      });
+      msgCache.set(id, msgs);
+      recomputeUnread(id);
+    }
+  );
+  unreadUnsubs.set(id, unsub);
 }
 
-async function countUnread(col,id,cutoff){
-  try{
-    let q;
-    if(cutoff){
-      q=query(collection(db,col,id,'messages'),where('createdAt','>',cutoff),where('uid','!=',currentUser.uid));
-    } else {
-      q=query(collection(db,col,id,'messages'),where('uid','!=',currentUser.uid));
-    }
-    const snap=await getDocs(q);
-    const count=snap.size;
-    unreadCounts.set(id,count);
-    refreshSidebarBadge(id);
-  }catch(e){ /* non-critical */ }
+function recomputeUnread(id){
+  const msgs      = msgCache.get(id) || [];
+  const lastRead  = lastReadCache.get(id) || 0;
+  // Count messages from OTHERS that arrived AFTER our lastRead
+  const count = msgs.filter(m => m.uid !== currentUser.uid && m.createdAt > lastRead).length;
+  unreadCounts.set(id, count);
+  refreshSidebarBadge(id);
 }
 
 function refreshSidebarBadge(id){
